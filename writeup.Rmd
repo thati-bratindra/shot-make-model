@@ -1,0 +1,496 @@
+---
+title: "Predicting the Chance an NBA Shot Goes In"
+author: "Bratindra Reddy Thati"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    df_print: kable
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,
+                      fig.width = 9, fig.height = 4.5, dpi = 110)
+library(dplyr); library(ggplot2); library(knitr)
+a <- readRDS("model_artifacts.rds")
+fmt  <- function(x, d = 5) formatC(x, format = "f", digits = d)
+comma <- function(x) format(x, big.mark = ",")
+theme_set(theme_minimal(base_size = 12))
+
+score_of <- function(m) a$scores$oof_logloss[a$scores$model == m]
+w         <- a$blend_weight
+
+# ---- variable dictionary: used for the table at the end AND for graph labels
+dict <- tibble::tribble(
+  ~group, ~feature, ~short, ~what, ~how,
+
+  "Shot location", "distance", "Shot distance",
+  "How far the shot was taken from the rim, in feet.",
+  "Supplied in the data.",
+  "Shot location", "dist_calc", "Shot distance (recomputed)",
+  "The same distance, recomputed from the court coordinates as a cross-check.",
+  "sqrt((locationx + 41.75)^2 + locationy^2); the rim sits at x = -41.75, y = 0.",
+  "Shot location", "dist_resid", "Distance mismatch",
+  "Whether the supplied and recomputed distances disagree. Almost always about zero.",
+  "distance - dist_calc.",
+  "Shot location", "log_dist", "Log shot distance",
+  "Distance on a compressed scale, which spreads out the short range where make rates change fastest.",
+  "log(1 + dist_calc).",
+  "Shot location", "angle", "Shot angle",
+  "Direction of the shot relative to the rim. 0 = straight on from the top, 90 = from the baseline/corner.",
+  "atan2(|locationy|, locationx + 41.75), converted to degrees. Left and right sides are treated the same.",
+  "Shot location", "abs_y", "Sideways position",
+  "How far to the left or right of the middle of the court the shooter was, in feet.",
+  "|locationy|.",
+  "Shot location", "locationx", "Court x-coordinate",
+  "Position along the sideline, in feet. The rim is at -41.75; half court is 0.",
+  "Supplied in the data.",
+  "Shot location", "locationy", "Court y-coordinate",
+  "Position along the baseline, in feet. 0 is the middle of the court.",
+  "Supplied in the data.",
+  "Shot location", "three", "Three-point attempt",
+  "1 if the shot was a three-pointer, otherwise 0.",
+  "Supplied in the data (TRUE/FALSE converted to 1/0).",
+  "Shot location", "corner_three", "Corner three",
+  "1 if the shot was a three taken from the corner, which is a shorter three.",
+  "1 when three = 1 and |locationy| > 20 ft.",
+
+  "Closest defender", "closestdefdist", "Closest defender distance",
+  "How far the nearest defender was from the shooter at the moment of release, in feet.",
+  "Supplied in the data.",
+  "Closest defender", "def_d100", "Defender distance 1.00s before",
+  "Nearest defender's distance one second before the shot.",
+  "1st number of the closestdefapproach list.",
+  "Closest defender", "def_d075", "Defender distance 0.75s before",
+  "Nearest defender's distance three-quarters of a second before the shot.",
+  "2nd number of the closestdefapproach list.",
+  "Closest defender", "def_d050", "Defender distance 0.50s before",
+  "Nearest defender's distance half a second before the shot.",
+  "3rd number of the closestdefapproach list.",
+  "Closest defender", "def_d025", "Defender distance 0.25s before",
+  "Nearest defender's distance a quarter-second before the shot.",
+  "4th number of the closestdefapproach list.",
+  "Closest defender", "def_close_1s", "Ground closed in last second",
+  "How many feet the defender closed in during the final second. Positive = defender was getting closer.",
+  "def_d100 - closestdefdist.",
+  "Closest defender", "def_close_late", "Defender closing speed",
+  "How fast the defender was closing in right at the end, in feet per second.",
+  "(def_d025 - closestdefdist) / 0.25.",
+  "Closest defender", "def_min_window", "Tightest defender distance",
+  "The closest the defender got at any point in the last second, including release.",
+  "Minimum of def_d100, def_d075, def_d050, def_d025 and closestdefdist.",
+  "Closest defender", "def_dist_ratio", "Openness for this shot",
+  "Defender space relative to shot length. 3 ft of space is smothering on a layup but wide open on a 26-footer.",
+  "closestdefdist / (dist_calc + 1).",
+
+  "Contesters", "num_contesters", "Number of contesters",
+  "How many defenders were labelled as contesting the shot.",
+  "Supplied in the data.",
+  "Contesters", "contested", "Contested flag",
+  "1 if the shot was contested at all, otherwise 0.",
+  "Supplied in the data (TRUE/FALSE converted to 1/0).",
+  "Contesters", "distcont1", "Contester 1 distance",
+  "Distance of the first contester, in feet. Blank if nobody contested.",
+  "Supplied in the data.",
+  "Contesters", "distcont2", "Contester 2 distance",
+  "Distance of the second contester, if any.", "Supplied in the data.",
+  "Contesters", "distcont3", "Contester 3 distance",
+  "Distance of the third contester, if any.", "Supplied in the data.",
+  "Contesters", "distcont4", "Contester 4 distance",
+  "Distance of the fourth contester, if any. Almost always blank.", "Supplied in the data.",
+  "Contesters", "min_cont", "Nearest contester",
+  "Distance of the closest contester.",
+  "Minimum of distcont1-4, ignoring blanks.",
+  "Contesters", "mean_cont", "Average contester distance",
+  "Average distance of all contesters.",
+  "Mean of distcont1-4, ignoring blanks.",
+  "Contesters", "n_cont_4", "Contesters within 4 ft",
+  "How many contesters were within 4 feet.",
+  "Count of distcont1-4 below 4.",
+  "Contesters", "n_cont_2", "Contesters within 2 ft",
+  "How many contesters were within 2 feet.",
+  "Count of distcont1-4 below 2.",
+  "Contesters", "pressure", "Defensive pressure",
+  "One number for how crowded the shot was. Close defenders count a lot, far ones a little.",
+  "Sum of 1 / (1 + distance) over all contesters. 0 when nobody contested.",
+
+  "Shooter & clock", "shooterspeed", "Shooter speed",
+  "How fast the shooter was moving at release, in feet per second.",
+  "Supplied in the data.",
+  "Shooter & clock", "dribbles", "Dribbles before shot",
+  "Number of dribbles before shooting, capped at 12.",
+  "min(dribblesbefore, 12).",
+  "Shooter & clock", "no_dribble", "Catch-and-shoot",
+  "1 if the shooter took zero dribbles.",
+  "1 when dribblesbefore = 0.",
+  "Shooter & clock", "many_dribbles", "Heavy dribbling",
+  "1 if the shooter took 6 or more dribbles.",
+  "1 when dribblesbefore >= 6.",
+  "Shooter & clock", "shotclock", "Shot clock",
+  "Seconds left on the shot clock.",
+  "Supplied in the data.",
+  "Shooter & clock", "shotclock_lt4", "Shot clock under 4s",
+  "1 if the shot was rushed at the end of the clock.",
+  "1 when shotclock < 4.",
+  "Shooter & clock", "shotclock_gt18", "Shot clock over 18s",
+  "1 if the shot came very early in the possession.",
+  "1 when shotclock > 18.",
+
+  "Season", "month_idx", "Month of season",
+  "Point in the season, in season order.",
+  "OCT = 1, NOV = 2, ... APR = 7.",
+  "Season", "season_idx", "Season",
+  "Which season the game was in.",
+  "season_id converted to a number.",
+
+  "Shot type", "shottype_dunk",    "Shot type: dunk",    "1 if the shot was a dunk.",    "One-hot switch from shottype.",
+  "Shot type", "shottype_layup",   "Shot type: layup",   "1 if the shot was a layup.",   "One-hot switch from shottype.",
+  "Shot type", "shottype_jumper",  "Shot type: jumper",  "1 if the shot was a jumper.",  "One-hot switch from shottype.",
+  "Shot type", "shottype_floater", "Shot type: floater", "1 if the shot was a floater.", "One-hot switch from shottype.",
+  "Shot type", "shottype_post",    "Shot type: post",    "1 if the shot was a post-up.", "One-hot switch from shottype.",
+  "Shot type", "shottype_tip",     "Shot type: tip",     "1 if the shot was a tip-in.",  "One-hot switch from shottype.",
+  "Shot type", "shottype_heave",   "Shot type: heave",   "1 if the shot was a long desperation heave.", "One-hot switch from shottype.",
+  "Game state", "gamestate_HALFCOURT",  "Half-court possession", "1 if the shot came in a set half-court possession.", "One-hot switch from gamestate.",
+  "Game state", "gamestate_TRANSITION", "Transition",            "1 if the shot came on a fast break.",              "One-hot switch from gamestate.",
+  "Game state", "gamestate_DIRECTSECONDCHANCE", "Putback / second chance", "1 if the shot came directly off an offensive rebound.", "One-hot switch from gamestate.",
+
+  "Skill ratings", "enc_shooter", "Shooter skill rating",
+  "How much more (+) or less (-) often this shooter makes shots than a typical player would on the exact same shots.",
+  "Sum of (actual result - Stage 1 expected chance) over the player's shots, divided by (number of shots + 150). Always computed without the shots being predicted.",
+  "Skill ratings", "n_shooter", "Shooter sample size",
+  "How many shots the shooter skill rating is based on, so the model knows how much to trust it.",
+  "log(1 + number of shots by that shooter in the training data).",
+  "Skill ratings", "enc_shooter_typ", "Shooter skill on this shot type",
+  "Same as the shooter skill rating, but only on this kind of shot (e.g. this player's jumpers from three).",
+  "Same formula, grouped by shooter + shot type + three/two, divided by (shots + 250).",
+  "Skill ratings", "n_shooter_typ", "Shot-type sample size",
+  "How many shots the shot-type skill rating is based on.",
+  "log(1 + number of shots in that shooter/shot-type group).",
+  "Skill ratings", "enc_closestdef", "Defender impact rating",
+  "How much better (+) or worse (-) shooters do than expected when this player is the closest defender. Negative = a good defender.",
+  "Same formula, grouped by closest defender, divided by (shots + 300).",
+  "Skill ratings", "n_closestdef", "Defender sample size",
+  "How many shots the defender impact rating is based on.",
+  "log(1 + number of shots with that closest defender).",
+  "Skill ratings", "enc_off_team", "Offensive team rating",
+  "How much better (+) or worse (-) than expected this team shoots.",
+  "Same formula, grouped by offensive team, divided by (shots + 800).",
+  "Skill ratings", "n_off_team", "Offensive team sample size",
+  "How many shots the offensive team rating is based on.",
+  "log(1 + number of shots by that team).",
+  "Skill ratings", "enc_def_team", "Defensive team rating",
+  "How much better (+) or worse (-) than expected opponents shoot against this team. Negative = a good defensive team.",
+  "Same formula, grouped by defensive team, divided by (shots + 800).",
+  "Skill ratings", "n_def_team", "Defensive team sample size",
+  "How many shots the defensive team rating is based on.",
+  "log(1 + number of shots against that team)."
+)
+
+nice <- function(f) {
+  i <- match(f, dict$feature)
+  ifelse(is.na(i), f, paste0(dict$short[i], "  (", f, ")"))
+}
+```
+
+## The short version
+
+This model looks at a single NBA shot and estimates **the probability it goes in**, a number between 0 and 1. It learned from `r comma(a$n_train)` past shots and produced predictions for `r comma(a$n_test)` new ones.
+
+It works in two steps. First it asks *"how likely is a typical player to make this shot?"* using only the situation: how far away, how open, what kind of shot, how much time was left. That answer is used to rate every player: *"does this shooter make more or fewer shots than a typical player would have?"* A second model then makes the final prediction using both the shot details and those ratings. A second, simpler model gives a smoother opinion, and the two are blended together.
+
+**How good is it?** The standard score for this kind of problem is **log-loss**, where lower is better. Guessing the league average (`r fmt(a$base_rate, 3)`) for every shot scores `r fmt(score_of("intercept only"))`. This model scores **`r fmt(score_of("blend (final)"))`**, measured only on shots it was not allowed to study. And when it says a shot has a 40% chance, about 40% of those shots really do go in (see [Does it tell the truth?](#does-it-tell-the-truth)).
+
+**About the data.** Every shot in this report is synthetic. `simulate_data.R` invents 30 teams, a pool of players and `r comma(a$n_train + a$n_test)` shots with the same columns as NBA player-tracking shot data. Each player has hidden shooting and defending skills, and each make or miss is drawn from a probability built from the shot's location, the defenders, the clock and those skills. So the numbers below show how well the model recovers a known process, not how it does on real games.
+
+## What the model is trying to do
+
+### Probabilities, not yes/no
+
+A shot either goes in or it doesn't, but the *chance* it goes in is what matters. A wide-open layup might be 70%; a contested 30-footer might be 20%. Even a perfect model can't know which shots will actually drop, because shooting is partly luck. So the goal is honest probabilities, not correct yes/no calls.
+
+### How the score works: log-loss
+
+**Log-loss** measures how surprised the model was by what actually happened. Saying "90% chance" and seeing a make costs almost nothing. Saying "90% chance" and seeing a miss costs a lot, because the model was confidently wrong. Averaged over hundreds of thousands of shots, this rewards a model for being confident only when it should be.
+
+### Why calibration comes first
+
+A make probability is only useful if it means what it says: give 1,000 shots a 40% chance each and about 400 of them should go in. That changes the strategy in one important way: there is no reward for bold predictions. If a shot's true chance is 81% and this model says 95%, it loses points even when the shot goes in. So the design choices below favour **calibration** (probabilities that mean what they say) over squeezing out the last bit of sharpness. Averaging several models together, blending in a smoother model, and never predicting below `r a$pred_summary[["Min."]] |> round(3)` or above `r a$pred_summary[["Max."]] |> round(3)` all come from that thinking.
+
+## How the model is built
+
+```{r architecture, fig.height=7.8, fig.width=9}
+flow <- tibble::tribble(
+  ~x,  ~y,  ~kind,  ~label,
+  2.2, 8.0, "data",  paste0("1. Raw shot data\n", comma(a$n_train), " training shots"),
+  2.2, 6.7, "prep",  "2. Feature engineering\nturn raw columns into ~50 clues",
+  2.2, 5.4, "model", "3. Stage 1 GBM\nexpected make chance from the shot alone",
+  2.2, 4.1, "prep",  "4. Skill ratings\nwho beats expectations, and by how much",
+  2.2, 2.8, "model", "5. Stage 2 GBM\nshot clues + skill ratings",
+  5.0, 2.8, "model", "6. Spline logistic regression\na smooth, simpler second opinion",
+  3.6, 1.5, "out",   if (w < 1) paste0("7. Blend\n", round(100 * w), "% GBM + ", round(100 * (1 - w)), "% spline")
+                     else "7. Blend\n(GBM only)",
+  3.6, 0.2, "out",   "8. Calibration check + safety limits\n-> predictions.csv"
+)
+arrows <- tibble::tribble(
+  ~x,  ~y,   ~xend, ~yend,
+  2.2, 7.55, 2.2,  7.15,
+  2.2, 6.25, 2.2,  5.85,
+  2.2, 4.95, 2.2,  4.55,
+  2.2, 3.65, 2.2,  3.25,
+  3.0, 3.85, 4.5,  3.25,
+  2.8, 2.35, 3.3,  1.95,
+  4.6, 2.35, 3.9,  1.95,
+  3.6, 1.05, 3.6,  0.65
+)
+ggplot() +
+  geom_segment(data = arrows, aes(x, y, xend = xend, yend = yend),
+               arrow = arrow(length = unit(0.2, "cm"), type = "closed"),
+               colour = "grey45") +
+  annotate("curve", x = 3.4, y = 6.7, xend = 5.2, yend = 3.25, curvature = -0.25,
+           arrow = arrow(length = unit(0.2, "cm"), type = "closed"),
+           colour = "grey70", linetype = 2) +
+  annotate("curve", x = 0.95, y = 6.45, xend = 0.95, yend = 3.05, curvature = 0.35,
+           arrow = arrow(length = unit(0.2, "cm"), type = "closed"),
+           colour = "grey70", linetype = 2) +
+  geom_label(data = flow, aes(x, y, label = label, fill = kind),
+             size = 3.6, lineheight = 0.95, label.padding = unit(0.5, "lines")) +
+  scale_fill_manual(values = c(data = "#ececec", prep = "#dbe8f5",
+                               model = "#fde2c8", out = "#d7eed7"), guide = "none") +
+  coord_cartesian(xlim = c(0.4, 6.6), ylim = c(-0.3, 8.5)) +
+  theme_void() +
+  labs(caption = "Blue = preparing data  |  Orange = a model  |  Green = final output\nDashed lines: Stage 2 and the spline model both read the engineered clues directly.\nStage 1's prediction is used only to build the skill ratings; it is not passed to Stage 2.")
+```
+
+Here is what each box does.
+
+**1. Raw shot data.** Every row is one shot: where it was taken, where the defenders were, the shot clock, who shot it, and whether it went in.
+
+**2. Feature engineering.** The raw columns are turned into **features**: clues the model can learn from. Some are copied straight across (shot distance). Others are calculated. For example, the data gives the closest defender's distance at four moments before the shot; from that we calculate *how fast the defender was closing in*, because a defender sprinting at you is very different from one standing still at the same spot. Every feature is explained in the [Variable dictionary](#variable-dictionary).
+
+**3. Stage 1: a gradient boosted model on the shot alone.** A **gradient boosted model (GBM)** is a large team of simple decision trees. Each tree asks a handful of yes/no questions ("Was the shot within 5 feet? Was the defender within 3 feet?") and makes a rough guess. The next tree focuses only on the mistakes the earlier trees made, and so on for hundreds of trees. Stage 1 deliberately does **not** know who took the shot. Its job is to answer: *how likely is a typical player to make this exact shot?* That answer is called the shot's **expected make chance**. Stage 1 is never used to make the final predictions. It exists only to give us a fair baseline to measure players against in the next step.
+
+**4. Skill ratings.** Now we compare each player's actual results to the Stage 1 expectation. If a player's shots were expected to go in 45% of the time and they went in 52% of the time, that player is beating expectations. This is much fairer than a raw shooting percentage, because a center who only dunks will have a high percentage without being a skilled shooter. Two safety rules keep these ratings honest:
+
+- **No grading your own test.** A shot is never allowed to affect the rating used to predict that same shot. Otherwise the model would just be memorising answers (a problem called **target leakage**).
+- **One lucky shot doesn't make a star.** A player with only a few shots gets pulled strongly toward "average." Only players with lots of shots are allowed to have ratings far from zero. This is called **shrinkage**.
+
+The same idea is used to rate defenders, teams, and each player on each type of shot.
+
+**5. Stage 2: a gradient boosted model on the shot clues plus the skill ratings.** Same kind of model as Stage 1, but now it also knows who is shooting, who is defending, and how each of them tends to perform compared to expectations. It is **not** given Stage 1's prediction itself. Stage 2 already has every shot clue Stage 1 had, so it can work out shot quality on its own, and handing it Stage 1's answer caused problems (see [What went wrong along the way](#what-went-wrong-along-the-way)). To make the predictions more stable, five versions of this model are trained on different slices of the data and their answers are averaged.
+
+**6. Spline logistic regression.** A second, much simpler model. **Logistic regression** is a classic method that turns a weighted sum of features into a probability. **Splines** let it draw smooth curves instead of straight lines, so it can capture, for example, how make rates fall steeply between 0 and 10 feet and then level off. It is less accurate than the GBM on its own, but it never makes jumpy predictions.
+
+**7. Blend.** The two models make different kinds of mistakes, so mixing them cancels some of those mistakes out. The mix was chosen by testing every split from 0% to 100% and keeping the best: **`r round(100 * w)`% GBM, `r round(100 * (1 - w))`% spline**. The mixing is done on the **log-odds** scale rather than directly on probabilities, which stops predictions near 0 or 1 from being squashed.
+
+**8. Calibration check and safety limits.** A final check confirms the probabilities are trustworthy (explained below). `r if (a$platt_applied) "A small correction called **Platt scaling** was applied because the predictions were slightly off overall." else "No correction was needed."` Every prediction is also kept between `r a$pred_summary[["Min."]] |> round(3)` and `r a$pred_summary[["Max."]] |> round(3)`, because one "0% chance" shot that goes in would cost more than thousands of good predictions earn.
+
+## The clues the model uses
+
+There are `r a$n_features` features in total, in six groups. Simple names and exact formulas for every one are in the [Variable dictionary](#variable-dictionary).
+
+- **Where the shot was taken:** distance, angle to the rim, whether it was a three, whether it was a corner three.
+- **The closest defender:** how far away at release, how far away in the second before, and how fast they were closing in.
+- **The contesters:** how many defenders contested, how close the nearest one was, and a single **pressure** score that adds up all of them, with close defenders counting more.
+- **The shooter's situation:** how fast they were moving, how many dribbles they took, and how much time was on the shot clock.
+- **The type and context of the shot:** dunk, layup, jumper, etc., and whether it came in the half court, in transition, or right off an offensive rebound.
+- **Skill ratings:** how the shooter, the closest defender, and both teams tend to perform compared to expectations.
+
+## How we checked it
+
+### Hiding the answers: cross-validation
+
+If you test a student using the exact questions they studied, they'll ace it without having learned anything. Models are the same. So the model is only ever scored on shots it didn't get to study.
+
+This is done with **5-fold cross-validation**. The training shots are shuffled and split into 5 equal groups. The model trains on 4 groups and predicts the 5th. This repeats 5 times, so every shot is predicted once, always by a model that never saw its result. These are called **out-of-fold (OOF) predictions**, and every score in this report comes from them.
+
+### Scores
+
+```{r scores}
+a$scores |>
+  filter(!is.na(oof_logloss)) |>
+  mutate(`Improvement over guessing` = fmt(a$scores$oof_logloss[1] - oof_logloss, 4),
+         oof_logloss = fmt(oof_logloss)) |>
+  rename(Model = model, `Log-loss (lower is better)` = oof_logloss) |>
+  kable()
+```
+
+Each step improves on the one before. The per-fold scores for the Stage 2 model were `r paste(fmt(a$fold_ll, 4), collapse = ", ")`. They are close to each other, which means the improvements above are real and not just luck in how the shots were split.
+
+### Settings
+
+The GBM uses these settings. Most exist to stop the model from **overfitting**, which means memorising noise in the training data instead of learning real patterns.
+
+```{r params}
+p <- a$params
+explain <- c(
+  eta              = "Learning rate: each tree only corrects a small fraction of the remaining error",
+  max_depth        = "Each tree asks at most this many questions in a row",
+  min_child_weight = "A tree can't make a rule from fewer than ~this many shots",
+  subsample        = "Each tree sees a random 80% of shots",
+  colsample_bytree = "Each tree sees a random 80% of features",
+  lambda           = "Penalty that keeps any single tree from being too extreme",
+  tree_method      = "Fast histogram-based method for finding the best questions"
+)
+tibble(Setting = names(explain),
+       Value = vapply(names(explain), function(n) as.character(p[[n]])[1], character(1)),
+       `What it does` = unname(explain)) |>
+  kable()
+```
+
+Instead of guessing how many trees to use, the model uses **early stopping**: it keeps adding trees until 50 in a row fail to improve the score on the held-out group. `r if (all(!is.na(a$best_rounds))) paste0("The five Stage 2 models stopped at ", paste(a$best_rounds, collapse = ", "), " trees.") else ""`
+
+## What the model relies on
+
+### Feature importance
+
+**How to read this:** longer bars mean the model got more use out of that feature. The measure is called **gain**: how much a feature improved the model's predictions, added up over every time it was used and averaged across the five models.
+
+```{r importance, fig.height=6}
+a$importance |>
+  slice_head(n = 20) |>
+  mutate(Feature = reorder(nice(Feature), Gain)) |>
+  ggplot(aes(Gain, Feature)) +
+  geom_col(fill = "#3b6ea5") +
+  labs(title = "Top 20 features by importance (gain)", x = "Gain (share of total)", y = NULL)
+```
+
+Because Stage 2 builds its own picture of shot quality, the chart shows what actually drives the prediction rather than one summary number. Two things stand out. **Openness for this shot** (defender distance relative to shot distance) ranks near the top, ahead of raw defender distance, which supports the idea that space only means something relative to the shot being taken. And the **shooter skill ratings** outrank the team ratings, meaning who takes the shot matters more than what team they play for.
+
+### SHAP: how each feature pushes an individual prediction
+
+Importance says *how much* a feature matters overall. **SHAP values** show *which direction* it pushes each individual shot.
+
+**How to read this:** each dot is one shot. Dots to the right of the centre line are shots where that feature **raised** the predicted chance; dots to the left are where it **lowered** it. Colour shows the feature's value on that shot: red = high, blue = low.
+
+For example, for shot distance you should see red dots (long shots) on the left and blue dots (short shots) on the right: long shots are less likely to go in.
+
+```{r shap, fig.height=5.5}
+a$shap_long |>
+  group_by(feature) |>
+  mutate(v = (value - min(value, na.rm = TRUE)) /
+             (max(value, na.rm = TRUE) - min(value, na.rm = TRUE) + 1e-9)) |>
+  ungroup() |>
+  mutate(feature = reorder(nice(feature), abs(shap), FUN = mean)) |>
+  ggplot(aes(shap, feature, colour = v)) +
+  geom_vline(xintercept = 0, colour = "grey60") +
+  geom_jitter(height = 0.25, alpha = 0.3, size = 0.6) +
+  scale_colour_gradient(low = "#4e79a7", high = "#e15759",
+                        name = "Feature value", breaks = c(0, 1), labels = c("low", "high")) +
+  labs(title = "How the top 10 features push individual predictions",
+       x = "Effect on predicted chance (log-odds; right = more likely to go in)", y = NULL)
+```
+
+## Does it tell the truth?
+
+### Calibration
+
+This is the most important check. **Calibration** asks: when the model says 40%, do about 40% of those shots actually go in?
+
+**How to read this:** all shots are sorted by their predicted chance and split into 20 equal-sized groups. Each dot is one group. Its position across is the model's average prediction; its position up is how often those shots actually went in. If the model is honest, every dot sits on the diagonal line.
+
+```{r cal, fig.height=4.5, fig.width=6}
+a$calibration |>
+  ggplot(aes(pred, actual)) +
+  geom_abline(slope = 1, intercept = 0, colour = "grey60") +
+  geom_point(colour = "#3b6ea5", size = 2.5) +
+  coord_equal() +
+  labs(title = "Predicted vs. actual make rate",
+       x = "Model's average predicted chance", y = "Share of shots that actually went in")
+```
+
+The dots sit on the line across the whole range, from the lowest-chance shots to the highest.
+
+### Checking one feature at a time
+
+The same check, but broken down along three features. **How to read this:** the black line is how often shots actually went in; the red dashed line is what the model predicted. When they overlap, the model has learned the real pattern.
+
+```{r effects, fig.height=3.8}
+a$effects |>
+  ggplot(aes(x)) +
+  geom_line(aes(y = actual, colour = "Actual"), linewidth = 0.8) +
+  geom_line(aes(y = pred, colour = "Predicted"), linewidth = 0.8, linetype = 2) +
+  facet_wrap(~ var, scales = "free_x") +
+  scale_colour_manual(values = c(Actual = "#333333", Predicted = "#e15759"), name = NULL) +
+  labs(title = "Predicted vs. actual make rate along three features",
+       y = "Make rate", x = NULL)
+```
+
+- **Shot distance:** the make rate falls sharply in the first few feet, then flattens out through the mid-range and three-point range.
+- **Closest defender:** the further away the defender, the higher the make rate, with most of the change happening within the first few feet.
+- **Shot clock:** shots with almost no time left go in less often, because they tend to be forced.
+
+### By shot type
+
+```{r bytype}
+a$by_type |>
+  mutate(pred = fmt(pred, 3), actual = fmt(actual, 3), n = comma(n)) |>
+  kable(col.names = c("Shot type", "Number of shots", "Average predicted chance", "Actual make rate"))
+```
+
+The model's average prediction matches the real make rate within each shot type as well.
+
+## What went wrong along the way
+
+**The data had hidden formatting issues.** The defender-approach column stores four numbers inside one piece of text, like `{20.05,18.82,16.57,13.86}`, which had to be split apart. Months were stored as three-letter codes (OCT, NOV...), which would have been sorted alphabetically (APR first) if not mapped to season order. Makes and misses were stored as TRUE/FALSE rather than 1/0. And some contester columns are empty in almost every row, which caused R to guess their type wrong and drop real values. I built and debugged the whole pipeline on a random 60,000-shot sample first, so these showed up quicker than after a full run.
+
+**The spline model failed to fit.** The first version of the spline logistic regression included a term for *shot type × three-pointer*. But there are **zero three-point dunks and zero three-point tip-ins** in the data (and only 4 three-point layups). The model tried to estimate an effect with no examples, the numbers ran off toward infinity, and it failed to converge on every fold. A second problem: 46% of shots have zero dribbles, so the spline for dribbles placed one of its bend points exactly at the edge of the data and broke. Both were fixed by simplifying those terms, and the code now warns if the model ever fails to converge again.
+
+**Software version differences.** The installed version of the xgboost package (3.2) had changed how it stores the "best number of trees" found by early stopping. Before this was caught, predictions were using about 50 extra trees beyond the best point. The code now handles both old and new versions.
+
+**Stage 2 was copying Stage 1.** In the first version, Stage 1's prediction was also passed into Stage 2 as a feature (a technique called **stacking**). On the 60,000-shot practice run it took about 50% of Stage 2's total importance: Stage 2 was mostly repeating Stage 1's answer instead of learning from the skill ratings. It also created a subtle mismatch. On training shots, that input came from a single model that hadn't seen the shot; on test shots, it came from an average of five models, which is smoother. So Stage 2 would have learned from one version of the input and been used on a different one. Since Stage 2 already has every feature Stage 1 used, I removed it. That makes the design match its purpose: Stage 1 sets the baseline for rating players, and Stage 2 makes the prediction.
+
+## What I would do next
+
+**Richer shooter profiles.** Right now each shooter gets one overall skill rating and one per shot type. With more time I'd rate shooters separately on catch-and-shoot versus off-the-dribble shots, and on open versus contested shots.
+
+**More about the defender.** The data only identifies the closest defender. Their height, their track record at contesting, and whether they contested at the release point or at the rim would all help.
+
+**More about the possession.** Score margin, time left in the game, and what happened just before the shot (a rebound, a steal) probably explain some of what the shot-clock and game-state features are picking up indirectly.
+
+**A different way of handling player ratings.** A **hierarchical (mixed-effects) model** would estimate player skill and the right amount of shrinkage at the same time, instead of using fixed shrinkage values (150, 300, 800) that were chosen by judgment.
+
+## Glossary
+
+| Term | Simple Definition |
+|---|---|
+| **Probability** | A number from 0 to 1 for how likely something is. 0.4 = 40% chance. |
+| **Log-loss** | The score used here. Measures how surprised the model was by what actually happened. Lower is better. |
+| **Feature** | A clue the model uses to make its prediction, like shot distance. |
+| **Feature engineering** | Calculating new, more useful clues from the raw data. |
+| **Decision tree** | A model that makes predictions by asking a short series of yes/no questions. |
+| **Gradient boosted model (GBM)** | Hundreds of small decision trees, each one correcting the mistakes of the ones before it. Built here with the xgboost package. |
+| **Logistic regression** | A classic model that turns a weighted combination of features into a probability. |
+| **Spline** | A smooth, bendable curve, used so a model isn't forced to draw straight lines. |
+| **Log-odds** | Another way of writing a probability that stretches it from 0-to-1 onto a line with no end, which makes it easier to average and combine. |
+| **Cross-validation** | Splitting the data into groups, training on some and testing on the others, so the model is always scored on data it hasn't seen. |
+| **Out-of-fold (OOF) prediction** | A prediction made for a shot by a model that was not trained on that shot. |
+| **Overfitting** | When a model memorises noise in its training data instead of learning real patterns, so it looks good in training but does worse on new data. |
+| **Early stopping** | Stopping adding trees once they no longer improve the held-out score. |
+| **Target leakage** | When information about the answer accidentally sneaks into the features, making the model look better than it really is. |
+| **Shrinkage** | Pulling estimates based on small amounts of data toward the average, because they are unreliable. |
+| **Stacking** | Using one model's predictions as an input to another model. |
+| **Blending** | Averaging the predictions of two or more models. |
+| **Calibration** | Whether predicted probabilities match reality: of all shots given 40%, do about 40% go in? |
+| **Platt scaling** | A simple correction that shifts or stretches all predictions if they are consistently too high or too low. |
+| **Gain** | How much a feature improved the model's predictions, used to rank feature importance. |
+| **SHAP value** | For one prediction, how much a single feature pushed the predicted chance up or down. |
+
+## Variable dictionary
+
+Every feature the model uses, grouped by what it describes. The **name on graphs** is how it appears in the charts above; the code name is shown in brackets.
+
+```{r dictionary, results='asis'}
+used <- unique(c(a$importance$Feature, a$shap_long$feature))
+d <- dict |> filter(feature %in% used | !grepl("^(shottype_|gamestate_)", feature))
+for (g in unique(d$group)) {
+  cat("\n\n### ", g, "\n\n", sep = "")
+  print(kable(d |> filter(group == g) |>
+                transmute(`Name on graphs` = short,
+                          `Code name` = paste0("`", feature, "`"),
+                          `What it measures` = what,
+                          `How it's calculated` = how)))
+}
+```
+
+**About the skill ratings.** All of them use the same recipe. For every shot, take *what actually happened* (1 = make, 0 = miss) minus *what Stage 1 expected* (a probability). A positive number means the shot beat expectations. Add these up for a player, then divide by their number of shots **plus a fixed number** (150 for shooters, 250 for shooter/shot-type, 300 for defenders, 800 for teams). That extra number is the shrinkage: a player with 10 shots gets divided by 160 and ends up near zero, while a player with 3,000 shots gets divided by 3,150 and keeps nearly their full rating. The shots being predicted are always left out of the calculation, so no shot can help predict itself. The matching sample-size features (`n_...`) tell the model how much data each rating is based on.
